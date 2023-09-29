@@ -1,5 +1,6 @@
 import math
 import os
+import pickle
 from collections import defaultdict, namedtuple
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,7 +30,7 @@ class AUMRecord:
 class AUMCalculator():
     def __init__(self, save_dir: str, compressed: bool = True):
         """
-        Intantiates the AUM object
+        Intantiates the AUM object. Checks if an existing object already exists.
 
         :param save_dir (str): Directory location of where to save out the final csv file(s)
             when calling `finalize`
@@ -41,13 +42,19 @@ class AUMCalculator():
             `full_aum_records.csv` being saved out when calling `finalize`.
             Defaults to True.
         """
-        self.save_dir = save_dir
-        self.counts = defaultdict(int)
-        self.sums = defaultdict(float)
 
-        self.compressed = compressed
-        if not compressed:
-            self.records = []
+        # continue from last saved records if exists, else start from beginning
+        if os.path.exists(os.path.join(save_dir, 'aum_records.pkl')):
+            self._load_progress(save_dir)
+            print('Resuming AUM Calculator')
+        else:
+            self.save_dir = save_dir
+            self.counts = defaultdict(int)
+            self.sums = defaultdict(float)
+
+            self.compressed = compressed
+            if not compressed:
+                self.records = []
 
     def update(self, logits: torch.Tensor, targets: torch.Tensor,
                sample_ids: List[sample_identifier]) -> Dict[sample_identifier, AUMRecord]:
@@ -75,6 +82,8 @@ class AUMCalculator():
         other_logit_index = other_logit_index.squeeze()
 
         margin_values = (target_values - other_logit_values).tolist()
+        if type(margin_values) != list:  # .tolist() turns 1-element tensors to float, not 1 element lists
+            margin_values = [margin_values]
 
         updated_aums = {}
         for i, (sample_id, margin) in enumerate(zip(sample_ids, margin_values)):
@@ -84,9 +93,9 @@ class AUMCalculator():
             record = AUMRecord(sample_id=sample_id,
                                num_measurements=self.counts[sample_id],
                                target_logit=targets[i].item(),
-                               target_val=target_values[i].item(),
-                               other_logit=other_logit_index[i].item(),
-                               other_val=other_logit_values[i].item(),
+                               target_val=target_values.item() if target_values.dim() == 0 else target_values[i].item(),
+                               other_logit=other_logit_index.item() if other_logit_index.dim() == 0 else other_logit_index[i].item(),
+                               other_val=other_logit_values.item() if other_logit_values.dim() == 0 else other_logit_values[i].item(),
                                margin=margin,
                                aum=self.sums[sample_id] / self.counts[sample_id])
 
@@ -137,3 +146,21 @@ class AUMCalculator():
         df = pd.DataFrame([asdict(record) for record in records])
         df.sort_values(by=['sample_id', 'num_measurements'], inplace=True)
         return df
+
+    def save_progress(self):
+        """
+        Helper function to save current AUMCalculator object.
+        """
+        filename = os.path.join(self.save_dir, 'aum_records.pkl')
+        with open(filename, 'wb') as outp:
+            pickle.dump(self.__dict__, outp, pickle.HIGHEST_PROTOCOL)
+
+    def _load_progress(self, save_dir: str):
+        """
+        Helper function to load existing AUMCalculator object.
+
+        :param records (str): Directory location of where the files are being saved
+        """
+        filename = os.path.join(save_dir, 'aum_records.pkl')
+        with open(filename, 'rb') as inp:
+            self.__dict__ = pickle.load(inp)
